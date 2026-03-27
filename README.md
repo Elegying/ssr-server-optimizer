@@ -22,13 +22,13 @@ This project applies the same optimization set we used on your servers:
 Run this on the target server as `root`:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/YOUR_GITHUB_USERNAME/ssr-server-optimizer/main/optimize-ssr.sh | bash
+curl -fsSL https://raw.githubusercontent.com/Elegying/ssr-server-optimizer/main/optimize-ssr.sh | bash
 ```
 
 If you prefer to login from your local machine and execute remotely in one line:
 
 ```bash
-ssh root@YOUR_SERVER_IP "curl -fsSL https://raw.githubusercontent.com/YOUR_GITHUB_USERNAME/ssr-server-optimizer/main/optimize-ssr.sh | bash"
+ssh root@YOUR_SERVER_IP "curl -fsSL https://raw.githubusercontent.com/Elegying/ssr-server-optimizer/main/optimize-ssr.sh | bash"
 ```
 
 ## What the script changes
@@ -58,4 +58,3 @@ ssh root@YOUR_SERVER_IP "curl -fsSL https://raw.githubusercontent.com/YOUR_GITHU
 
 - The script does not lock down the SSR admin panel. If you want, a later version can also restrict the panel to trusted IPs.
 - This project is intentionally focused on the older Python SSR layout you are using now.
-
