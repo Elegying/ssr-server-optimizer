@@ -3,6 +3,11 @@ set -euo pipefail
 
 SSR_DIR="/usr/local/shadowsocksr"
 SSR_CONFIG="$SSR_DIR/user-config.json"
+MUDB_FILE="$SSR_DIR/mudb.json"
+PANEL_DIR="/opt/ssr-admin-panel"
+DEVICE_STATS_SCRIPT="$PANEL_DIR/scripts/collect_device_stats.py"
+DEVICE_STATS_FILE="/var/lib/ssr-admin-panel/device-stats.json"
+DEVICE_STATS_SERVICE="/etc/systemd/system/ssr-device-stats.service"
 SYSCTL_FILE="/etc/sysctl.d/99-z-ssr-performance.conf"
 SERVICE_FILE="/etc/systemd/system/ssr.service"
 TIMESTAMP="$(date +%F-%H%M%S)"
@@ -23,6 +28,20 @@ require_root() {
 require_tools() {
   command -v systemctl >/dev/null 2>&1 || fail "systemctl not found"
   command -v python3 >/dev/null 2>&1 || fail "python3 not found"
+}
+
+ensure_ss_tool() {
+  if command -v ss >/dev/null 2>&1; then
+    return
+  fi
+
+  log "ss command not found; trying to install iproute2"
+  if command -v apt-get >/dev/null 2>&1; then
+    DEBIAN_FRONTEND=noninteractive apt-get update -qq >/dev/null 2>&1 || true
+    DEBIAN_FRONTEND=noninteractive apt-get install -y iproute2 -qq >/dev/null 2>&1 || true
+  elif command -v yum >/dev/null 2>&1; then
+    yum install -y iproute -q >/dev/null 2>&1 || true
+  fi
 }
 
 backup_file() {
@@ -123,6 +142,38 @@ WantedBy=multi-user.target
 EOF
 }
 
+write_device_stats_unit() {
+  if [[ ! -f "$DEVICE_STATS_SCRIPT" ]]; then
+    log "device stats collector not found; skipping device stats service"
+    return
+  fi
+
+  ensure_ss_tool
+  mkdir -p "$(dirname "$DEVICE_STATS_FILE")"
+  chmod +x "$DEVICE_STATS_SCRIPT" 2>/dev/null || true
+  log "writing device stats service"
+  backup_file "$DEVICE_STATS_SERVICE"
+  cat > "$DEVICE_STATS_SERVICE" <<EOF
+[Unit]
+Description=SSR Device Stats Collector
+After=network.target
+
+[Service]
+Type=simple
+User=root
+ExecStart=$(command -v python3) $DEVICE_STATS_SCRIPT --mudb $MUDB_FILE --output $DEVICE_STATS_FILE --interval 15 --window 900 --watch
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+  systemctl daemon-reload
+  systemctl enable ssr-device-stats >/dev/null 2>&1 || true
+  systemctl restart ssr-device-stats || true
+}
+
 apply_sysctl() {
   log "reloading sysctl"
   sysctl --system >/tmp/ssr-optimizer-sysctl.log 2>&1 || true
@@ -174,6 +225,7 @@ main() {
   write_sysctl
   fix_conflicting_backlog
   write_systemd_unit
+  write_device_stats_unit
   apply_sysctl
   restart_ssr
   verify

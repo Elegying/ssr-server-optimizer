@@ -9,6 +9,7 @@
 - 开启 SSR `fast_open`
 - 优化内核 TCP 与 socket 缓冲参数，提升稳定性和吞吐表现
 - 将 SSR 改为 `systemd` 托管，支持自动重启与开机自启
+- 如果检测到 `/opt/ssr-admin-panel`，同步刷新面板设备统计服务
 - 在修改前自动备份原配置文件
 
 ## 适用环境
@@ -41,6 +42,7 @@ ssh root@你的服务器IP "curl -fsSL https://raw.githubusercontent.com/Elegyin
 - 写入 `/etc/sysctl.d/99-z-ssr-performance.conf`
 - 如果系统里存在旧的 `tcp_max_syn_backlog = 1024` 覆盖项，会自动修正
 - 创建 `/etc/systemd/system/ssr.service`
+- 如已安装 SSR Admin Panel，创建或刷新 `ssr-device-stats.service`
 - 重载 `sysctl` 与 `systemd`
 - 用 `systemd` 重新拉起 SSR
 
