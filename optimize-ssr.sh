@@ -1,16 +1,20 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -Eeuo pipefail
 
-SSR_DIR="/usr/local/shadowsocksr"
-SSR_CONFIG="$SSR_DIR/user-config.json"
-MUDB_FILE="$SSR_DIR/mudb.json"
-PANEL_DIR="/opt/ssr-admin-panel"
-DEVICE_STATS_SCRIPT="$PANEL_DIR/scripts/collect_device_stats.py"
-DEVICE_STATS_FILE="/var/lib/ssr-admin-panel/device-stats.json"
-DEVICE_STATS_SERVICE="/etc/systemd/system/ssr-device-stats.service"
-SYSCTL_FILE="/etc/sysctl.d/99-z-ssr-performance.conf"
-SERVICE_FILE="/etc/systemd/system/ssr.service"
+SSR_DIR="${SSR_DIR:-/usr/local/shadowsocksr}"
+SSR_CONFIG="${SSR_CONFIG:-$SSR_DIR/user-config.json}"
+MUDB_FILE="${MUDB_FILE:-$SSR_DIR/mudb.json}"
+PANEL_DIR="${PANEL_DIR:-/opt/ssr-admin-panel}"
+DEVICE_STATS_SCRIPT="${DEVICE_STATS_SCRIPT:-$PANEL_DIR/scripts/collect_device_stats.py}"
+DEVICE_STATS_FILE="${DEVICE_STATS_FILE:-/var/lib/ssr-admin-panel/device-stats.json}"
+SYSTEMD_DIR="${SYSTEMD_DIR:-/etc/systemd/system}"
+SYSCTL_DIR="${SYSCTL_DIR:-/etc/sysctl.d}"
+DEVICE_STATS_SERVICE="${DEVICE_STATS_SERVICE:-$SYSTEMD_DIR/ssr-device-stats.service}"
+SYSCTL_FILE="${SYSCTL_FILE:-$SYSCTL_DIR/99-z-ssr-performance.conf}"
+SERVICE_FILE="${SERVICE_FILE:-$SYSTEMD_DIR/ssr.service}"
 TIMESTAMP="$(date +%F-%H%M%S)"
+BACKUP_FILES=""
+ROLLBACK_ON_ERROR=0
 
 log() {
   printf '[ssr-opt] %s\n' "$*"
@@ -22,12 +26,14 @@ fail() {
 }
 
 require_root() {
+  [[ "${SSR_OPT_SKIP_ROOT_CHECK:-0}" = "1" ]] && return
   [[ "${EUID:-$(id -u)}" -eq 0 ]] || fail "run as root"
 }
 
 require_tools() {
   command -v systemctl >/dev/null 2>&1 || fail "systemctl not found"
   command -v python3 >/dev/null 2>&1 || fail "python3 not found"
+  command -v sysctl >/dev/null 2>&1 || fail "sysctl not found"
 }
 
 ensure_ss_tool() {
@@ -47,7 +53,40 @@ ensure_ss_tool() {
 backup_file() {
   local file="$1"
   if [[ -f "$file" ]]; then
-    cp -a "$file" "${file}.bak.${TIMESTAMP}"
+    local backup="${file}.bak.${TIMESTAMP}"
+    cp -a "$file" "$backup"
+    BACKUP_FILES="${BACKUP_FILES}${file}|${backup}
+"
+  else
+    BACKUP_FILES="${BACKUP_FILES}${file}|
+"
+  fi
+}
+
+restore_backups() {
+  local line file backup
+  while IFS= read -r line; do
+    [[ -n "$line" ]] || continue
+    file="${line%%|*}"
+    backup="${line#*|}"
+    if [[ -f "$backup" ]]; then
+      cp -a "$backup" "$file"
+      log "restored $file from $backup"
+    elif [[ -e "$file" ]]; then
+      rm -rf "$file"
+      log "removed newly created $file"
+    fi
+  done <<EOF
+$BACKUP_FILES
+EOF
+}
+
+on_error() {
+  local line="${1:-unknown}"
+  if [[ "$ROLLBACK_ON_ERROR" -eq 1 ]]; then
+    log "error at line $line; restoring changed files"
+    restore_backups
+    systemctl daemon-reload >/dev/null 2>&1 || true
   fi
 }
 
@@ -84,7 +123,9 @@ PY
 
 write_sysctl() {
   log "writing sysctl tuning"
+  log "will update $SYSCTL_FILE"
   backup_file "$SYSCTL_FILE"
+  mkdir -p "$(dirname "$SYSCTL_FILE")"
   cat > "$SYSCTL_FILE" <<'EOF'
 fs.file-max = 1048576
 net.core.somaxconn = 8192
@@ -108,7 +149,7 @@ EOF
 }
 
 fix_conflicting_backlog() {
-  for file in /etc/sysctl.conf /etc/sysctl.d/99-sysctl.conf; do
+  for file in "${SYSCTL_CONF:-/etc/sysctl.conf}" "${SYSCTL_DIR}/99-sysctl.conf"; do
     if [[ -f "$file" ]] && grep -Eq '^[[:space:]]*net\.ipv4\.tcp_max_syn_backlog[[:space:]]*=[[:space:]]*1024([[:space:]]*)$' "$file"; then
       log "fixing old backlog override in $file"
       backup_file "$file"
@@ -121,7 +162,9 @@ write_systemd_unit() {
   local pybin
   pybin="$(detect_python)"
   log "writing systemd service"
+  log "will update $SERVICE_FILE"
   backup_file "$SERVICE_FILE"
+  mkdir -p "$(dirname "$SERVICE_FILE")"
   cat > "$SERVICE_FILE" <<EOF
 [Unit]
 Description=ShadowsocksR Python Server
@@ -152,7 +195,9 @@ write_device_stats_unit() {
   mkdir -p "$(dirname "$DEVICE_STATS_FILE")"
   chmod +x "$DEVICE_STATS_SCRIPT" 2>/dev/null || true
   log "writing device stats service"
+  log "will update $DEVICE_STATS_SERVICE"
   backup_file "$DEVICE_STATS_SERVICE"
+  mkdir -p "$(dirname "$DEVICE_STATS_SERVICE")"
   cat > "$DEVICE_STATS_SERVICE" <<EOF
 [Unit]
 Description=SSR Device Stats Collector
@@ -176,7 +221,13 @@ EOF
 
 apply_sysctl() {
   log "reloading sysctl"
-  sysctl --system >/tmp/ssr-optimizer-sysctl.log 2>&1 || true
+  local log_file="/tmp/ssr-optimizer-sysctl.log"
+  if sysctl --system >"$log_file" 2>&1; then
+    return
+  fi
+
+  log "sysctl reload reported warnings/errors; see $log_file"
+  sed 's/^/[ssr-opt] sysctl: /' "$log_file" >&2 || true
 }
 
 restart_ssr() {
@@ -217,10 +268,34 @@ PY
   log "completed successfully"
 }
 
-main() {
+check_mode() {
   require_root
   require_tools
   validate_layout
+  command -v ss >/dev/null 2>&1 || fail "ss not found; install iproute2 before applying optimization"
+
+  log "preflight ok"
+  log "SSR_DIR=$SSR_DIR"
+  log "SSR_CONFIG=$SSR_CONFIG"
+  log "SYSCTL_FILE=$SYSCTL_FILE"
+  log "SERVICE_FILE=$SERVICE_FILE"
+  if [[ -f "$DEVICE_STATS_SCRIPT" ]]; then
+    log "device stats collector found"
+  else
+    log "device stats collector not found; device stats service will be skipped"
+  fi
+}
+
+run_apply() {
+  require_root
+  require_tools
+  validate_layout
+  log "planned changes:"
+  log "- update SSR config: timeout=300, udp_timeout=120, fast_open=true"
+  log "- write sysctl tuning: $SYSCTL_FILE"
+  log "- write systemd unit: $SERVICE_FILE"
+  log "- refresh device stats unit when panel collector exists"
+  ROLLBACK_ON_ERROR=1
   patch_ssr_config
   write_sysctl
   fix_conflicting_backlog
@@ -229,6 +304,22 @@ main() {
   apply_sysctl
   restart_ssr
   verify
+  ROLLBACK_ON_ERROR=0
+}
+
+main() {
+  case "${1:-}" in
+    --check)
+      check_mode
+      ;;
+    "")
+      trap 'on_error $LINENO' ERR
+      run_apply
+      ;;
+    *)
+      fail "unknown option: $1"
+      ;;
+  esac
 }
 
 main "$@"

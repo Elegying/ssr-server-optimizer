@@ -33,6 +33,16 @@ curl -fsSL https://raw.githubusercontent.com/Elegying/ssr-server-optimizer/main/
 ssh root@你的服务器IP "curl -fsSL https://raw.githubusercontent.com/Elegying/ssr-server-optimizer/main/optimize-ssr.sh | bash"
 ```
 
+## 预检模式
+
+正式优化前可以先做只读检查：
+
+```bash
+bash optimize-ssr.sh --check
+```
+
+预检只确认 SSR 目录、`user-config.json`、`systemctl`、`python3`、`sysctl` 和 `ss` 是否可用，不会写入 `/etc` 或修改 SSR 配置。
+
 ## 脚本会做什么
 
 - 更新 `/usr/local/shadowsocksr/user-config.json`
@@ -45,12 +55,33 @@ ssh root@你的服务器IP "curl -fsSL https://raw.githubusercontent.com/Elegyin
 - 如已安装 SSR Admin Panel，创建或刷新 `ssr-device-stats.service`
 - 重载 `sysctl` 与 `systemd`
 - 用 `systemd` 重新拉起 SSR
+- 执行前输出变更摘要；执行失败时按备份自动恢复已修改文件
 
 ## 安全性
 
 - 修改前会创建带时间戳的备份
+- 如果启动或校验失败，会恢复已备份文件并重载 systemd
 - 除必要优化项外，尽量保留原有 SSR 配置
 - 自动识别实际安装的 `python` / `python3` 路径
+
+## 验证与排查
+
+本地发版前建议运行：
+
+```bash
+bash -n optimize-ssr.sh
+python3 -m unittest discover -s tests -q
+```
+
+服务器上执行后可检查：
+
+```bash
+systemctl status ssr --no-pager
+journalctl -u ssr -n 50 --no-pager
+sysctl -n net.ipv4.tcp_max_syn_backlog
+```
+
+如果 `sysctl --system` 报告某些内核参数不支持，脚本会输出 `/tmp/ssr-optimizer-sysctl.log` 的位置，方便确认是容器/内核限制还是配置问题。
 
 ## 项目文件
 
